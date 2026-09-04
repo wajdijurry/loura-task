@@ -4,8 +4,7 @@ const url = process.env.TEST_DATABASE_URL;
 if (!url) {
   console.error(
     'TEST_DATABASE_URL is required for integration tests.\n' +
-      'Create database loura_test, then either:\n' +
-      '  export TEST_DATABASE_URL=postgres://loura:loura@localhost:5432/loura_test\n' +
+      'Create database loura_test and set TEST_DATABASE_URL=postgres://loura:loura@localhost:5434/loura_test\n' +
       'or start a disposable instance:\n' +
       '  docker compose --profile test up -d postgres-test\n' +
       '  export TEST_DATABASE_URL=postgres://loura:loura@localhost:5434/loura_test',

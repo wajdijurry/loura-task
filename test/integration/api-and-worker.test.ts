@@ -491,24 +491,23 @@ describe('ticket API and worker integration', () => {
   });
 
   it('graceful cancellation restores the claim attempt and does not fail a healthy ticket', async () => {
-    let resolveGate: (() => void) | undefined;
-    let gate = new Promise<void>((resolve) => {
-      resolveGate = resolve;
+    let markStarted: (() => void) | undefined;
+    let modelStarted = new Promise<void>((resolve) => {
+      markStarted = resolve;
     });
+    let modelCalls = 0;
 
+    // Cooperative model: observes abort, but only after generate has started.
     const gatedModel: ModelClient = {
       async generate(_prompt, signal) {
-        await new Promise<void>((resolve, reject) => {
+        modelCalls += 1;
+        markStarted?.();
+        await new Promise<void>((_resolve, reject) => {
           if (signal.aborted) {
             reject(new Error('aborted'));
             return;
           }
-          const onAbort = () => reject(new Error('aborted'));
-          signal.addEventListener('abort', onAbort, { once: true });
-          gate.then(() => {
-            signal.removeEventListener('abort', onAbort);
-            resolve();
-          });
+          signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
         });
         return JSON.stringify({
           category: 'other',
@@ -525,8 +524,8 @@ describe('ticket API and worker integration', () => {
     });
 
     for (let i = 0; i < 5; i += 1) {
-      gate = new Promise<void>((resolve) => {
-        resolveGate = resolve;
+      modelStarted = new Promise<void>((resolve) => {
+        markStarted = resolve;
       });
       const worker = makeWorker(gatedModel, {
         workerId: 'cancel-worker',
@@ -535,11 +534,12 @@ describe('ticket API and worker integration', () => {
         maxAttempts: 1,
       });
       expect(await worker.processBatch()).toBe(1);
-      await waitUntil(async () => worker.inFlightCount === 1);
+      await modelStarted;
+      expect(modelCalls).toBe(i + 1);
       await worker.stop();
-      resolveGate?.();
     }
 
+    expect(modelCalls).toBe(5);
     const row = await db().query(
       `SELECT j.state, j.attempt_count, j.last_error_code, t.status
        FROM classification_jobs j
@@ -553,18 +553,31 @@ describe('ticket API and worker integration', () => {
   });
 
   it('stop() returns promptly when the model ignores abort after grace', async () => {
+    let markStarted: (() => void) | undefined;
+    const modelStarted = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    let lateResolve: ((value: string) => void) | undefined;
+    const lateResult = new Promise<string>((resolve) => {
+      lateResolve = resolve;
+    });
+    let modelCalls = 0;
+
     const hanging: ModelClient = {
+      // Intentionally ignores AbortSignal — proves application-enforced deadline/cancel.
       async generate() {
-        await new Promise(() => undefined);
-        return '{}';
+        modelCalls += 1;
+        markStarted?.();
+        return lateResult;
       },
     };
+
     await api().inject({
       method: 'POST',
       url: '/v1/tickets',
       payload: { id: 't-hang-stop', subject: 'H', body: 'hang' },
     });
-    const classification = new ClassificationService(hanging, 200);
+    const classification = new ClassificationService(hanging, 10_000);
     const worker = new ClassificationWorker({
       pool: db(),
       classification,
@@ -583,17 +596,45 @@ describe('ticket API and worker integration', () => {
       },
     });
     expect(await worker.processBatch()).toBe(1);
-    await waitUntil(async () => worker.inFlightCount === 1);
+    await modelStarted;
+    expect(modelCalls).toBe(1);
 
     const started = Date.now();
     await worker.stop();
     expect(Date.now() - started).toBeLessThan(5_000);
     expect(worker.inFlightCount).toBe(0);
+    expect(modelCalls).toBe(1);
 
     const leased = await db().query(
       `SELECT COUNT(*)::int AS c FROM classification_jobs WHERE lease_owner IS NOT NULL`,
     );
     expect(leased.rows[0]?.c).toBe(0);
+
+    const beforeLate = await db().query(
+      `SELECT j.state, j.attempt_count, t.status
+       FROM classification_jobs j
+       JOIN tickets t ON t.id = j.ticket_id
+       WHERE t.id = 't-hang-stop'`,
+    );
+    expect(beforeLate.rows[0]?.state).toBe('pending');
+    expect(beforeLate.rows[0]?.attempt_count).toBe(0);
+    expect(beforeLate.rows[0]?.status).toBe('pending');
+
+    // Late completion after lease release must not commit.
+    lateResolve?.(
+      JSON.stringify({
+        category: 'other',
+        priority: 'low',
+        summary: 'The customer submitted a general support request.',
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 100));
+    const afterLate = await db().query(
+      `SELECT j.state, t.status FROM classification_jobs j
+       JOIN tickets t ON t.id = j.ticket_id WHERE t.id = 't-hang-stop'`,
+    );
+    expect(afterLate.rows[0]?.state).toBe('pending');
+    expect(afterLate.rows[0]?.status).toBe('pending');
   });
 
   it('does not start model execution after stopping begins', async () => {

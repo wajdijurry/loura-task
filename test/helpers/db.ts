@@ -14,7 +14,7 @@ export function requireTestDatabaseUrl(): string {
   if (!url) {
     throw new Error(
       'TEST_DATABASE_URL is required for integration tests. ' +
-        'Create database loura_test and set TEST_DATABASE_URL=postgres://loura:loura@localhost:5432/loura_test',
+        'Create database loura_test and set TEST_DATABASE_URL=postgres://loura:loura@localhost:5434/loura_test',
     );
   }
 

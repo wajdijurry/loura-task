@@ -43,7 +43,28 @@ export class InvalidModelOutputError extends Error {
   }
 }
 
-const KNOWN_ABBREVIATION_END = /(?:^|\s)(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|Inc|Ltd|Co|Corp|vs|etc)\.\s*$/i;
+const KNOWN_ABBREVIATION_END =
+  /(?:^|\s)(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|Inc|Ltd|Co|Corp|vs|etc|a\.m|p\.m|U\.S|u\.s)\.\s*$/i;
+
+/** Mask tokens that contain periods so sentence heuristics do not false-positive. */
+function maskAbbreviationPeriods(summary: string): string {
+  return summary
+    .replaceAll('.NET', 'DOTNET')
+    .replace(/\b(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|Inc|Ltd|Co|Corp|vs|etc)\./gi, 'ABBR')
+    .replace(/\b(?:a\.m|p\.m|U\.S|u\.s)\./gi, 'ABBR');
+}
+
+function shouldMergeSegments(prev: string, next: string): boolean {
+  if (KNOWN_ABBREVIATION_END.test(prev)) {
+    return true;
+  }
+  // Intl.Segmenter splits ".NET" into "." + "NET …"
+  const nextTrimmed = next.replace(/^\s+/, '');
+  if (/\.\s*$/.test(prev) && /^NET\b/.test(nextTrimmed)) {
+    return true;
+  }
+  return false;
+}
 
 function segmentWithIntl(summary: string): string[] {
   const SegmenterCtor = (
@@ -67,11 +88,10 @@ function segmentWithIntl(summary: string): string[] {
     }
   }
 
-  // Merge abbreviation false-splits: "… Dr. " + "Smith …"
   const merged: string[] = [];
   for (const part of raw) {
     const prev = merged[merged.length - 1];
-    if (prev !== undefined && KNOWN_ABBREVIATION_END.test(prev)) {
+    if (prev !== undefined && shouldMergeSegments(prev, part)) {
       merged[merged.length - 1] = prev + part;
     } else {
       merged.push(part);
@@ -81,11 +101,14 @@ function segmentWithIntl(summary: string): string[] {
 }
 
 function countSentenceSegments(summary: string): number {
-  // Segmenter gaps: lowercase continuation and glued uppercase sentences.
-  if (/[.!?]\s+[a-z]/.test(summary)) {
+  const masked = maskAbbreviationPeriods(summary);
+  // Segmenter gaps: lowercase continuation after a terminator.
+  if (/[.!?]\s+[a-z]/.test(masked)) {
     return 2;
   }
-  if (/[.!?][A-Z]/.test(summary)) {
+  // Glued sentences ("First.Second") — require a letter before the terminator so
+  // tokens like ".NET" are not treated as a sentence boundary.
+  if (/[a-z][.!?][A-Z]/.test(masked)) {
     return 2;
   }
 

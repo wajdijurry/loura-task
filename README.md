@@ -4,24 +4,59 @@ Async HTTP service that ingests support tickets and classifies them with a durab
 
 ## Quick start
 
+Canonical host defaults:
+
+| Service | Host port |
+| --- | --- |
+| API | `3000` |
+| Application PostgreSQL | `5432` |
+| Test PostgreSQL (`postgres-test` profile) | `5434` |
+
 ```bash
-COMPOSE_PROJECT_NAME=loura_verify docker compose up --build
+docker compose up --build
 ```
 
 API: `http://localhost:3000` · Health: `GET /health`
+
+Internal container networking always uses Docker service names and container ports (`postgres:5432`, API health check `127.0.0.1:3000`). Host-port overrides never change those internals.
 
 The Compose `worker` service uses `stop_grace_period: 20s` so Docker’s stop window exceeds `WORKER_SHUTDOWN_GRACE_MS=15000`.
 
 Load samples (twice to demonstrate idempotency):
 
 ```bash
-cp .env.example .env   # optional for host-side tooling; not required for Compose
 npm ci
 npm run load-samples
 npm run load-samples   # all Idempotent-Replayed
 ```
 
-`scripts/load-samples.ts` loads `dotenv/config`, so `API_BASE_URL` from `.env` is respected (default `http://127.0.0.1:3000`).
+`scripts/load-samples.ts` loads `dotenv/config`. With no `.env`, it defaults to `http://127.0.0.1:3000`.
+
+### When ports 3000 / 5432 are already occupied
+
+```bash
+COMPOSE_PROJECT_NAME=loura_verify \
+API_PORT=3080 \
+POSTGRES_PORT=5433 \
+docker compose up --build
+```
+
+```bash
+API_BASE_URL=http://127.0.0.1:3080 npm run load-samples
+```
+
+### Integration-test database (dedicated Postgres 16)
+
+```bash
+COMPOSE_PROJECT_NAME=loura_test_verify \
+TEST_POSTGRES_PORT=5435 \
+docker compose --profile test up -d postgres-test
+
+TEST_DATABASE_URL=postgres://loura:loura@localhost:5435/loura_test \
+npm run test:integration
+```
+
+Default test host port (no override) is `5434`. Integration tests require `TEST_DATABASE_URL`, refuse names that do not end with `_test`, and never fall back to `DATABASE_URL`.
 
 ## API examples
 
@@ -131,7 +166,7 @@ Compose `stop_grace_period: 20s` > `WORKER_SHUTDOWN_GRACE_MS=15000`.
 2. Call `ModelClient.generate` → **raw string**.
 3. Require bare JSON object (no fences/prose).
 4. Strict Zod object: exact keys, no coercion, exact enums.
-5. Summary: non-empty, no leading/trailing whitespace, single line, ≤ 240 chars, **exactly one** `Intl.Segmenter` sentence segment (e.g. `v2.0` and normal abbreviations like `Dr.` are accepted; a second sentence is rejected). A short phrase without trailing punctuation is one segment.
+5. Summary: non-empty, no leading/trailing whitespace, single line, ≤ 240 chars, exactly one meaningful sentence via `Intl.Segmenter` plus documented abbreviation merges (`.NET`, `U.S.`, `p.m.`, `v2.0`, `Dr.` accepted; a second sentence rejected). A short phrase without trailing punctuation is one segment.
 6. Only then return a trusted domain `Classification`. No silent repair/truncation.
 
 Default adapter: deterministic **FakeModelClient**. It is **not** evidence of real model quality.
@@ -142,24 +177,12 @@ In one transaction: insert ticket + one job, or identical replay `200`, or conte
 
 ## Tests
 
-Integration tests **require** `TEST_DATABASE_URL` pointing at a database whose name ends with `_test` (e.g. `loura_test`). They never fall back to `DATABASE_URL`. `npm run test:integration` fails closed if the test DB is missing.
-
 ```bash
-# App DB (optional for unit-only work)
-docker compose up -d postgres
-
-# Dedicated test DB — either create on the app Postgres:
-#   docker compose exec postgres psql -U loura -d postgres -c "CREATE DATABASE loura_test"
-# or use the disposable test profile:
-docker compose --profile test up -d postgres-test
-export TEST_DATABASE_URL=postgres://loura:loura@localhost:5434/loura_test
-
-cp .env.example .env   # set TEST_DATABASE_URL accordingly
 npm ci
-DATABASE_URL="$TEST_DATABASE_URL" npm run migrate
 npm run test:unit          # no Postgres required
-npm run test:integration   # requires TEST_DATABASE_URL + Postgres 16
-npm run verify             # format, lint, typecheck, build, unit, integration
+# start postgres-test (default host port 5434), then:
+TEST_DATABASE_URL=postgres://loura:loura@localhost:5434/loura_test npm run test:integration
+TEST_DATABASE_URL=postgres://loura:loura@localhost:5434/loura_test npm run verify
 ```
 
 CI uses Postgres 16 and `loura_test`.
@@ -194,7 +217,7 @@ CI uses Postgres 16 and `loura_test`.
 
 ```bash
 docker compose up -d postgres
-cp .env.example .env
+cp .env.example .env   # optional; ignored by git
 npm ci && npm run migrate
 npm run dev:api      # terminal 1
 npm run dev:worker   # terminal 2
@@ -202,4 +225,4 @@ npm run dev:worker   # terminal 2
 
 ## Configuration
 
-See `.env.example`. `WORKER_ID` is optional (commented example); when omitted, a random per-process id is used. Empty effective worker ids are rejected. Startup validates env with Zod; `MODEL_TIMEOUT_MS` must be `< JOB_LEASE_MS`. Logs never include subjects, bodies, or raw model output.
+See `.env.example` for canonical defaults and commented host-port overrides. `.env` is gitignored and must never be committed. `WORKER_ID` is optional; when omitted, a random per-process id is used. Startup validates env with Zod; `MODEL_TIMEOUT_MS` must be `< JOB_LEASE_MS`. Logs never include subjects, bodies, raw model output, credentials, or database URLs.

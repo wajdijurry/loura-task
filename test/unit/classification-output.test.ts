@@ -89,6 +89,44 @@ describe('parseClassificationOutput', () => {
     expect(result.summary).toContain('v2.0');
   });
 
+  it('accepts summaries with .NET, U.S., p.m., and Dr. abbreviations', () => {
+    expect(
+      parseClassificationOutput(
+        JSON.stringify({
+          ...valid,
+          summary: 'The customer reports a bug in the .NET SDK after upgrade.',
+        }),
+      ).summary,
+    ).toContain('.NET');
+
+    expect(
+      parseClassificationOutput(
+        JSON.stringify({
+          ...valid,
+          summary: 'The customer lives in the U.S. and needs billing help.',
+        }),
+      ).summary,
+    ).toContain('U.S.');
+
+    expect(
+      parseClassificationOutput(
+        JSON.stringify({
+          ...valid,
+          summary: 'The customer called at 3 p.m. about a refund.',
+        }),
+      ).summary,
+    ).toContain('p.m.');
+
+    expect(
+      parseClassificationOutput(
+        JSON.stringify({
+          ...valid,
+          summary: 'The customer needs help with their Dr. Smith account billing.',
+        }),
+      ).summary,
+    ).toContain('Dr.');
+  });
+
   it('does not reject a normal abbreviation as a second sentence', () => {
     const result = parseClassificationOutput(
       JSON.stringify({
