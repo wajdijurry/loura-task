@@ -1,0 +1,104 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: loura
+      POSTGRES_PASSWORD: loura
+      POSTGRES_DB: loura
+    ports:
+      - '${POSTGRES_PORT:-5432}:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U loura -d loura']
+      interval: 2s
+      timeout: 5s
+      retries: 20
+
+  migrate:
+    build: .
+    command:
+      [
+        'npx',
+        'node-pg-migrate',
+        'up',
+        '--database-url-var',
+        'DATABASE_URL',
+        '--migrations-dir',
+        'migrations',
+      ]
+    environment:
+      DATABASE_URL: postgres://loura:loura@postgres:5432/loura
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build: .
+    command: ['node', 'dist/api/main.js']
+    environment:
+      DATABASE_URL: postgres://loura:loura@postgres:5432/loura
+      PORT: '3000'
+      HOST: 0.0.0.0
+      LOG_LEVEL: info
+      NODE_ENV: production
+      FAKE_MODEL_LATENCY_MS: '300'
+    ports:
+      - '${API_PORT:-3000}:3000'
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'node -e "fetch(\"http://127.0.0.1:3000/health\").then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"',
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  worker:
+    build: .
+    command: ['node', 'dist/worker/main.js']
+    stop_grace_period: 20s
+    environment:
+      DATABASE_URL: postgres://loura:loura@postgres:5432/loura
+      LOG_LEVEL: info
+      NODE_ENV: production
+      WORKER_CONCURRENCY: '4'
+      WORKER_POLL_INTERVAL_MS: '500'
+      JOB_LEASE_MS: '30000'
+      MODEL_TIMEOUT_MS: '10000'
+      WORKER_SHUTDOWN_GRACE_MS: '15000'
+      MAX_CLASSIFICATION_ATTEMPTS: '3'
+      FAKE_MODEL_LATENCY_MS: '300'
+      CLASSIFIER_VERSION: fake-v1
+      PROMPT_VERSION: v1
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      api:
+        condition: service_healthy
+
+  # Disposable Postgres for integration tests:
+  #   docker compose --profile test up -d postgres-test
+  #   TEST_DATABASE_URL=postgres://loura:loura@localhost:5434/loura_test
+  postgres-test:
+    profiles: [test]
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: loura
+      POSTGRES_PASSWORD: loura
+      POSTGRES_DB: loura_test
+    ports:
+      - '${TEST_POSTGRES_PORT:-5434}:5432'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U loura -d loura_test']
+      interval: 2s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  postgres_data:

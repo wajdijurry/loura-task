@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: loura
+          POSTGRES_PASSWORD: loura
+          POSTGRES_DB: loura
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U loura -d loura"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      DATABASE_URL: postgres://loura:loura@localhost:5432/loura
+      TEST_DATABASE_URL: postgres://loura:loura@localhost:5432/loura_test
+      NODE_ENV: test
+      LOG_LEVEL: silent
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Format check
+        run: npm run format:check
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Create test database
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client
+          PGPASSWORD=loura psql -h localhost -U loura -d loura -c "SELECT 1" >/dev/null
+          PGPASSWORD=loura psql -h localhost -U loura -d postgres -tc "SELECT 1 FROM pg_database WHERE datname='loura_test'" | grep -q 1 \
+            || PGPASSWORD=loura psql -h localhost -U loura -d postgres -c "CREATE DATABASE loura_test"
+
+      - name: Migrate app database
+        run: npm run migrate
+
+      - name: Migrate test database
+        run: DATABASE_URL="$TEST_DATABASE_URL" npm run migrate
+
+      - name: Test
+        run: npm test
