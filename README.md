@@ -2,6 +2,8 @@
 
 Async HTTP service that ingests support tickets and classifies them with a durable PostgreSQL-backed worker. Built as a production-minded take-home (not “production ready”): correctness, concurrency, failure semantics, and clear boundaries over feature count.
 
+Stack rationale (Node 22, TypeScript, Fastify, PostgreSQL, Zod, Vitest, Docker, and what was deliberately omitted) is documented in [TECHNOLOGY.md](./TECHNOLOGY.md).
+
 ## Quick start
 
 Canonical host defaults:
@@ -196,6 +198,8 @@ CI uses Postgres 16 and `loura_test`.
 | Empty subject | Allowed (sample dataset) |
 | Optional enhancement | Graceful shutdown only |
 | Exactly-once classification | Not claimed |
+
+Why this stack (and what was left out) is expanded in [TECHNOLOGY.md](./TECHNOLOGY.md).
 
 ## List indexes (minimal)
 
