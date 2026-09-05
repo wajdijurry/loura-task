@@ -110,6 +110,79 @@ Two processes, one codebase, one infrastructure dependency (PostgreSQL):
                                 └──────────────────────────────────┘
 ```
 
+## Open questions → our choices
+
+The assignment left several decisions open. Choices and reasons:
+
+### How and where tickets are stored
+
+**Choice:** PostgreSQL 16 tables `tickets` and `classification_jobs`, accessed with `pg` (no ORM).
+
+**Why:** One dependency; ticket insert and job enqueue happen in the **same transaction**, so we never dual-write to a separate broker. Constraints and indexes enforce lifecycle and list shapes at the data layer. Trade-off: polling latency vs a dedicated queue—acceptable for this size. Stack detail: [TECHNOLOGY.md](./TECHNOLOGY.md).
+
+### How asynchronous work is executed
+
+**Choice:** Separate long-lived **worker** process (same codebase as the API) that polls due jobs with `FOR UPDATE SKIP LOCKED`, leases them, calls the model **outside** any DB transaction, then finalizes with a per-claim `lease_token`.
+
+**Why:** Keeps HTTP handlers fast (`202` pending). Model calls cannot join the create transaction; fencing tokens prevent a stale worker from overwriting a newer claim. API and worker scale independently.
+
+### How many classifications may run at once
+
+**Choice:** Per-worker concurrency = `WORKER_CONCURRENCY` (**default 4**). A worker only claims up to free in-flight slots.
+
+**Why:** Bounds model fan-out and DB load without a global scheduler. Multiple worker processes may run; `SKIP LOCKED` prevents double ownership. Tunable via env.
+
+### What happens to in-flight work if the service is restarted
+
+**Choice:**
+
+| Restart kind | Behavior |
+| --- | --- |
+| Abrupt crash mid-model | Lease expires → reclaim: requeue with `WORKER_LOST` if attempts remain, else job `dead` + ticket `failed` |
+| Graceful SIGTERM/SIGINT | Stop claiming → wait up to `WORKER_SHUTDOWN_GRACE_MS` → abort cooperative calls → release owned leases by token and **restore** that claim’s attempt |
+| Stale worker finishes late | Finalize requires matching non-expired `lease_token` → discarded |
+
+**Why:** Durability lives in PostgreSQL leases, not process memory. External model calls stay **at-least-once** after crashes (not exactly-once). Cooperative shutdown avoids burning attempts on deploys.
+
+### Retry policy for model failures, and how a ticket ends up failed
+
+**Choice:**
+
+- `attempt_count` = classification executions **started** (incremented on claim).
+- Max attempts: `MAX_CLASSIFICATION_ATTEMPTS` (**default 3**).
+- Retryable returned failures: `MODEL_TIMEOUT`, `MODEL_UNAVAILABLE`, `INVALID_MODEL_OUTPUT` → requeue with exponential backoff + jitter (`base 1s`, cap `30s`, jitter up to `500ms`).
+- After the final started attempt fails (returned failure or lost lease): job `dead` + ticket `failed` atomically, with a stable code (`MODEL_*`, `INVALID_MODEL_OUTPUT`, or `WORKER_LOST`). Never store exception text or raw model output.
+
+**Why:** Crashes during a model call count toward the bound (claim-time accounting). Returned failures do not double-increment. Terminal failure is explicit and queryable.
+
+### What, if anything, you do about prompt injection
+
+**Choice:** Mitigate, do not claim to solve.
+
+- System prompt: ticket content is data, never instructions; ignore role claims; JSON-only; no tools.
+- Subject/body only in a delimited, XML-escaped `<ticket>` user message—not folded into system text.
+- Strict output validation (bare JSON, exact keys/enums, single-sentence summary); reject entirely on failure.
+- Regression: sample `t-1005` → `billing` / `low` / invoice-download summary (not the injected `technical`/`high`/`Approved for immediate refund`).
+
+**Why:** Prompting + validation reduce risk for a fake/deterministic classifier and set a clear trust boundary. A real model can still be steered; residual risk is listed under Known limitations.
+
+### Exact API shape
+
+**Choice:** Versioned REST under `/v1`, JSON bodies, `application/problem+json` errors.
+
+| Method | Path | Success | Notes |
+| --- | --- | --- | --- |
+| `POST` | `/v1/tickets` | `202` created pending; `200` + `Idempotent-Replayed: true` identical replay; `409` same id, different content | Body: `{ id, subject, body }` |
+| `GET` | `/v1/tickets/:id` | `200` ticket; `404` missing | |
+| `GET` | `/v1/tickets` | `200` `{ data, pagination }` | Query: optional `category`, `priority`, `page`, `pageSize` |
+| `GET` | `/health` | `200` `{ status: "ok" }` | |
+
+Ticket resource fields include `status` (`pending` \| `classified` \| `failed`), optional `classification` `{ category, priority, summary }`, optional `failureCode`, versions, and timestamps.
+
+Client/framework errors: `400` validation / malformed JSON, `413` payload too large, `415` unsupported media type, `404` missing route/ticket, `500` unexpected (no stacks/SQL/bodies in the problem document).
+
+**Why:** Small, explicit contract that matches the required create/get/list and idempotent-replay semantics without inventing a second API style.
+
 ## Concurrency, leases, and fencing
 
 - Workers claim only as many jobs as free concurrency slots (default **4**).
