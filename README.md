@@ -177,6 +177,8 @@ Default adapter: deterministic **FakeModelClient**. It is **not** evidence of re
 
 In one transaction: insert ticket + one job, or identical replay `200`, or content conflict `409`. No SELECT-then-INSERT.
 
+**Ticket IDs:** In a production API I would prefer the server to mint the ticket id (e.g. a UUID) and treat a separate client idempotency key as the replay token, rather than accepting an arbitrary id from the caller. Client-chosen ids invite collisions, spoofing of resource identifiers, and awkward ownership semantics. This submission still accepts `id` in `POST /v1/tickets` because the take-home requires that shape—presumably for deterministic samples and explicit idempotent-replay demos.
+
 ## Tests
 
 ```bash
@@ -196,6 +198,7 @@ CI uses Postgres 16 and `loura_test`.
 | Queue | PostgreSQL jobs table (transactional enqueue) |
 | Pagination | Offset (`page`/`pageSize`) |
 | Empty subject | Allowed (sample dataset) |
+| Ticket id source | Client-supplied (per assignment); server-generated preferred in production |
 | Optional enhancement | Graceful shutdown only |
 | Exactly-once classification | Not claimed |
 
